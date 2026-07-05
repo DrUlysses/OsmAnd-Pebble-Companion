@@ -27,11 +27,12 @@
     "watchapp": {
       "watchface": false
     },
-    "messageKeys": [
-      "TEMPERATURE",
-      "CONDITIONS",
-      "REQUEST_WEATHER"
-    ],
+    "messageKeys": {
+      "NAV_INSTRUCTION": 0,
+      "NAV_DISTANCE": 1,
+      "RECORDING_COMMAND": 2,
+      "HEALTH_HEART_RATE": 3
+    },
     "projectType": "native",
     "resources": {
       "media": []

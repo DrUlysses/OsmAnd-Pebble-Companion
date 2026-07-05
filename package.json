@@ -10,6 +10,11 @@
     "uuid": "70c3d279-9746-4eb7-a608-1a06fb61d2e3",
     "sdkVersion": "3",
     "enableMultiJS": true,
+    "capabilities": [
+      "location",
+      "configurable",
+      "health"
+    ],
     "targetPlatforms": [
       "aplite",
       "basalt",
@@ -23,8 +28,11 @@
       "watchface": false
     },
     "messageKeys": [
-      "dummy"
+      "TEMPERATURE",
+      "CONDITIONS",
+      "REQUEST_WEATHER"
     ],
+    "projectType": "native",
     "resources": {
       "media": []
     }

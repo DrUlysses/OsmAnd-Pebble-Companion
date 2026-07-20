@@ -14,18 +14,24 @@ import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
+import kotlinx.coroutines.*
 import net.osmand.aidlapi.IOsmAndAidlCallback
 import net.osmand.aidlapi.IOsmAndAidlInterface
+import net.osmand.aidlapi.customization.PreferenceParams
+import net.osmand.aidlapi.info.AppInfoParams
 import net.osmand.aidlapi.gpx.AGpxBitmap
 import net.osmand.aidlapi.gpx.StartGpxRecordingParams
 import net.osmand.aidlapi.gpx.StopGpxRecordingParams
+import net.osmand.aidlapi.plugins.PluginParams
 import net.osmand.aidlapi.logcat.OnLogcatMessageParams
 import net.osmand.aidlapi.navigation.ADirectionInfo
 import net.osmand.aidlapi.navigation.ANavigationUpdateParams
 import net.osmand.aidlapi.navigation.OnVoiceNavigationParams
 import net.osmand.aidlapi.search.SearchResult
+import kotlin.time.Duration.Companion.milliseconds
 
 class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, PebbleConnector.PebbleMessageListener {
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var osmandHelper: OsmAndHelper
     private lateinit var pebbleConnector: PebbleConnector
     private var isRecording = false
@@ -59,6 +65,7 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
 
     override fun onDestroy() {
         Log.d(TAG, "CompanionService Destroying")
+        serviceScope.cancel()
         osmandHelper.unbind()
         pebbleConnector.disconnect()
         super.onDestroy()
@@ -75,6 +82,7 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         lastDistance = "---"
         
         PebbleKit.startAppOnPebble(applicationContext, pebbleConnector.getAppUuid())
+        syncRecordingState(osmandAidlInterface)
         sendStateToPebble()
 
         try {
@@ -162,39 +170,83 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
     }
 
     override fun onMessageReceived(data: PebbleDictionary) {
-        Log.i(TAG, "Message received from Pebble: $data")
-        CompanionRepository.setPebbleConnected(true)
+        serviceScope.launch {
+            Log.i(TAG, "Message received from Pebble: $data")
+            CompanionRepository.setPebbleConnected(true)
 
-        if (data.getInteger(KEY_RECORDING_COMMAND) != null) {
-            toggleGpxRecording()
-        }
+            if (data.getInteger(KEY_RECORDING_COMMAND) != null) {
+                toggleGpxRecording()
+            }
 
-        val heartRate = data.getInteger(KEY_HEALTH_HEART_RATE)
-        if (heartRate != null) {
-            Log.d(TAG, "Heart rate from Pebble: $heartRate")
-            CompanionRepository.setHeartRate(heartRate.toInt())
+            val heartRate = data.getInteger(KEY_HEALTH_HEART_RATE)
+            if (heartRate != null) {
+                Log.d(TAG, "Heart rate from Pebble: $heartRate")
+                CompanionRepository.setHeartRate(heartRate.toInt())
+            }
+            
+            // Always send full state back to keep Pebble in sync
+            sendStateToPebble()
         }
-        
-        // Always send full state back to keep Pebble in sync
-        sendStateToPebble()
     }
 
-    private fun toggleGpxRecording() {
+    private suspend fun toggleGpxRecording() {
         val aidl = osmandHelper.getInterface() ?: return
         try {
+            if (aidl.appInfo == null) {
+                Log.e(TAG, "Not authorized to control OsmAnd. Please enable this Plugin in OsmAnd settings.")
+                return
+            }
             if (!isRecording) {
-                aidl.startGpxRecording(StartGpxRecordingParams())
-                isRecording = true
-                Log.i(TAG, "Started GPX recording")
+                val started = aidl.startGpxRecording(StartGpxRecordingParams())
+                if (!started) {
+                    Log.w(TAG, "Failed to start GPX recording, attempting to enable plugin...")
+                    val pluginEnabled = aidl.changePluginState(PluginParams("osmand.monitoring", 1))
+                    Log.i(TAG, "changePluginState(osmand.monitoring, 1) result: $pluginEnabled")
+                    
+                    // ponytail: wait for plugin to initialize
+                    delay(500.milliseconds)
+                    
+                    if (aidl.startGpxRecording(StartGpxRecordingParams())) {
+                        isRecording = true
+                        Log.i(TAG, "Started GPX recording after enabling plugin")
+                    } else {
+                        Log.e(TAG, "Still failed to start GPX recording. Monitoring plugin might be inactive or locked.")
+                    }
+                } else {
+                    isRecording = true
+                    Log.i(TAG, "Started GPX recording")
+                }
             } else {
-                aidl.stopGpxRecording(StopGpxRecordingParams())
-                isRecording = false
-                Log.i(TAG, "Stopped GPX recording")
+                if (aidl.stopGpxRecording(StopGpxRecordingParams())) {
+                    isRecording = false
+                    Log.i(TAG, "Stopped GPX recording")
+                }
             }
             CompanionRepository.setRecording(isRecording)
             sendStateToPebble()
         } catch (e: Exception) {
             Log.e(TAG, "Error toggling GPX recording", e)
+        }
+    }
+
+    private fun syncRecordingState(aidl: IOsmAndAidlInterface) {
+        serviceScope.launch {
+            try {
+                if (aidl.appInfo == null) {
+                    Log.w(TAG, "Cannot sync state: Not authorized")
+                    return@launch
+                }
+                val params = PreferenceParams("save_global_track_to_gpx")
+                if (aidl.getPreference(params)) {
+                    isRecording = params.value?.toBoolean() ?: false
+                    CompanionRepository.setRecording(isRecording)
+                    Log.i(TAG, "Synced recording state from OsmAnd: $isRecording")
+                } else {
+                    Log.w(TAG, "Failed to sync recording state: preference 'save_global_track_to_gpx' not available via AIDL (likely global)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing recording state", e)
+            }
         }
     }
 

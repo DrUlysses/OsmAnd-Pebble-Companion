@@ -35,7 +35,11 @@
       "SPEED": 4,
       "RECORDING_STATE": 5,
       "REFRESH_COMMAND": 6,
-      "NAV_TYPE": 7
+      "NAV_TYPE": 7,
+      "RECORDING_TIME": 8,
+      "RECORDING_DISTANCE": 9,
+      "REMAINING_DISTANCE": 10,
+      "REMAINING_TIME": 11
     },
     "projectType": "native",
     "resources": {

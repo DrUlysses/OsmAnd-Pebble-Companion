@@ -6,6 +6,11 @@ static TextLayer *s_dist_layer;
 static TextLayer *s_hr_layer;
 static TextLayer *s_speed_layer;
 static TextLayer *s_rec_layer;
+static TextLayer *s_time_layer;
+static TextLayer *s_rec_time_layer;
+static TextLayer *s_rec_dist_layer;
+static TextLayer *s_rem_dist_layer;
+static TextLayer *s_rem_time_layer;
 static Layer *s_arrow_layer;
 static int s_nav_type = 0;
 static bool s_is_recording = false;
@@ -67,24 +72,18 @@ static void prv_inbox_received_handler(DictionaryIterator *iter, void *context) 
     text_layer_set_text(s_dist_layer, dist_tuple->value->cstring);
   }
 
-  Tuple *rec_tuple = dict_find(iter, MESSAGE_KEY_RECORDING_COMMAND);
-  if (rec_tuple) {
-    s_is_recording = (rec_tuple->value->int32 != 0);
-    // Keeping s_is_recording for HR timer logic
-  }
-
   Tuple *rec_state_tuple = dict_find(iter, MESSAGE_KEY_RECORDING_STATE);
   if (rec_state_tuple) {
     int state = rec_state_tuple->value->int32;
     if (state == 1) { // Running
-      text_layer_set_text(s_rec_layer, "REC");
-      text_layer_set_background_color(s_rec_layer, GColorBlack);
-      text_layer_set_text_color(s_rec_layer, GColorWhite);
+      text_layer_set_text(s_rec_layer, ">");
+      text_layer_set_background_color(s_rec_layer, GColorWhite);
+      text_layer_set_text_color(s_rec_layer, GColorBlack);
       s_is_recording = true;
     } else if (state == 2) { // Paused
       text_layer_set_text(s_rec_layer, "||");
-      text_layer_set_background_color(s_rec_layer, GColorBlack);
-      text_layer_set_text_color(s_rec_layer, GColorWhite);
+      text_layer_set_background_color(s_rec_layer, GColorWhite);
+      text_layer_set_text_color(s_rec_layer, GColorBlack);
       s_is_recording = false;
     } else { // Stopped
       text_layer_set_text(s_rec_layer, "");
@@ -103,6 +102,34 @@ static void prv_inbox_received_handler(DictionaryIterator *iter, void *context) 
         s_hr_timer = NULL;
       }
     }
+  }
+
+  Tuple *rec_time_tuple = dict_find(iter, MESSAGE_KEY_RECORDING_TIME);
+  if (rec_time_tuple) {
+    static char rec_time_buffer[16];
+    snprintf(rec_time_buffer, sizeof(rec_time_buffer), "%s", rec_time_tuple->value->cstring);
+    text_layer_set_text(s_rec_time_layer, rec_time_buffer);
+  }
+
+  Tuple *rec_dist_tuple = dict_find(iter, MESSAGE_KEY_RECORDING_DISTANCE);
+  if (rec_dist_tuple) {
+    static char rec_dist_buffer[16];
+    snprintf(rec_dist_buffer, sizeof(rec_dist_buffer), "%s", rec_dist_tuple->value->cstring);
+    text_layer_set_text(s_rec_dist_layer, rec_dist_buffer);
+  }
+
+  Tuple *rem_dist_tuple = dict_find(iter, MESSAGE_KEY_REMAINING_DISTANCE);
+  if (rem_dist_tuple) {
+    static char rem_dist_buffer[16];
+    snprintf(rem_dist_buffer, sizeof(rem_dist_buffer), "%s", rem_dist_tuple->value->cstring);
+    text_layer_set_text(s_rem_dist_layer, rem_dist_buffer);
+  }
+
+  Tuple *rem_time_tuple = dict_find(iter, MESSAGE_KEY_REMAINING_TIME);
+  if (rem_time_tuple) {
+    static char rem_time_buffer[16];
+    snprintf(rem_time_buffer, sizeof(rem_time_buffer), "%s", rem_time_tuple->value->cstring);
+    text_layer_set_text(s_rem_time_layer, rem_time_buffer);
   }
 
   Tuple *speed_tuple = dict_find(iter, MESSAGE_KEY_SPEED);
@@ -158,6 +185,19 @@ static void prv_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, prv_select_click_handler);
   window_single_click_subscribe(BUTTON_ID_UP, prv_refresh_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, prv_refresh_click_handler);
+}
+
+static void prv_update_time() {
+  time_t temp = time(NULL);
+  struct tm *tick_time = localtime(&temp);
+
+  static char s_time_buffer[8];
+  strftime(s_time_buffer, sizeof(s_time_buffer), clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
+  text_layer_set_text(s_time_layer, s_time_buffer);
+}
+
+static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
+  prv_update_time();
 }
 
 static void prv_arrow_layer_update_proc(Layer *layer, GContext *ctx) {
@@ -244,41 +284,78 @@ static void prv_window_load(Window *window) {
   Layer *window_layer = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(window_layer);
 
-  // Recording status at top
-  s_rec_layer = text_layer_create(GRect(0, 0, bounds.size.w, 20));
+  // Current Time at Top Right
+  s_time_layer = text_layer_create(GRect(80, 0, bounds.size.w - 87, 20));
+  text_layer_set_text(s_time_layer, "00:00");
+  text_layer_set_text_alignment(s_time_layer, GTextAlignmentRight);
+  text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  layer_add_child(window_layer, text_layer_get_layer(s_time_layer));
+
+  // Recording status at Top Left
+  s_rec_layer = text_layer_create(GRect(2, 5, 15, 18));
   text_layer_set_text(s_rec_layer, "");
   text_layer_set_text_alignment(s_rec_layer, GTextAlignmentCenter);
   text_layer_set_font(s_rec_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   layer_add_child(window_layer, text_layer_get_layer(s_rec_layer));
 
-  // Navigation Arrow - Large Vector
-  s_arrow_layer = layer_create(GRect(0, 20, bounds.size.w, 50));
+  // Recording Time at Top Left
+  s_rec_time_layer = text_layer_create(GRect(15, 2, 68, 18));
+  text_layer_set_text(s_rec_time_layer, "Not Recording");
+  text_layer_set_text_alignment(s_rec_time_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_rec_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  layer_add_child(window_layer, text_layer_get_layer(s_rec_time_layer));
+
+  // Recording Distance below Rec Time
+  s_rec_dist_layer = text_layer_create(GRect(15, 20, 68, 18));
+  text_layer_set_text(s_rec_dist_layer, "");
+  text_layer_set_text_alignment(s_rec_dist_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_rec_dist_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  layer_add_child(window_layer, text_layer_get_layer(s_rec_dist_layer));
+
+  // Navigation Arrow
+  s_arrow_layer = layer_create(GRect(0, 35, bounds.size.w, 40));
   layer_set_update_proc(s_arrow_layer, prv_arrow_layer_update_proc);
   layer_add_child(window_layer, s_arrow_layer);
 
-  // Hidden text layer for compatibility or small fallback (we keep it for now but hidden)
+  // Hidden text layer for compatibility
   s_nav_layer = text_layer_create(GRect(0, 0, 0, 0));
 
-  // Distance - Medium
-  s_dist_layer = text_layer_create(GRect(0, 75, bounds.size.w, 40));
+  // Main Distance - Medium
+  s_dist_layer = text_layer_create(GRect(0, 75, bounds.size.w, 44));
   text_layer_set_text(s_dist_layer, "");
   text_layer_set_text_alignment(s_dist_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_dist_layer, fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK));
+  text_layer_set_font(s_dist_layer, fonts_get_system_font(FONT_KEY_BITHAM_42_MEDIUM_NUMBERS));
   layer_add_child(window_layer, text_layer_get_layer(s_dist_layer));
 
+  // Remaining Distance below main distance
+  s_rem_dist_layer = text_layer_create(GRect(0, 115, bounds.size.w, 24));
+  text_layer_set_text(s_rem_dist_layer, "");
+  text_layer_set_text_alignment(s_rem_dist_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_rem_dist_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
+  layer_add_child(window_layer, text_layer_get_layer(s_rem_dist_layer));
+
+  // Remaining Time below remaining distance
+  s_rem_time_layer = text_layer_create(GRect(0, 140, bounds.size.w, 24));
+  text_layer_set_text(s_rem_time_layer, "");
+  text_layer_set_text_alignment(s_rem_time_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_rem_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
+  layer_add_child(window_layer, text_layer_get_layer(s_rem_time_layer));
+
   // Heart Rate and Speed at bottom
-  int bottom_y = bounds.size.h - 35;
-  s_hr_layer = text_layer_create(GRect(0, bottom_y, bounds.size.w / 2, 25));
+  int bottom_y = bounds.size.h - 25;
+  s_hr_layer = text_layer_create(GRect(0, bottom_y, bounds.size.w / 3, 25));
   text_layer_set_text(s_hr_layer, "HR: --");
   text_layer_set_text_alignment(s_hr_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_hr_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_font(s_hr_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   layer_add_child(window_layer, text_layer_get_layer(s_hr_layer));
 
-  s_speed_layer = text_layer_create(GRect(bounds.size.w / 2, bottom_y, bounds.size.w / 2, 25));
+  s_speed_layer = text_layer_create(GRect(bounds.size.w / 2, bottom_y, bounds.size.w / 1.5, 25));
   text_layer_set_text(s_speed_layer, "0 km/h");
   text_layer_set_text_alignment(s_speed_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_speed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_font(s_speed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   layer_add_child(window_layer, text_layer_get_layer(s_speed_layer));
+
+  prv_update_time();
 }
 
 static void prv_window_unload(Window *window) {
@@ -288,6 +365,11 @@ static void prv_window_unload(Window *window) {
   text_layer_destroy(s_hr_layer);
   text_layer_destroy(s_speed_layer);
   text_layer_destroy(s_rec_layer);
+  text_layer_destroy(s_time_layer);
+  text_layer_destroy(s_rec_time_layer);
+  text_layer_destroy(s_rec_dist_layer);
+  text_layer_destroy(s_rem_dist_layer);
+  text_layer_destroy(s_rem_time_layer);
 }
 
 static void prv_init(void) {
@@ -311,6 +393,9 @@ static void prv_init(void) {
      APP_LOG(APP_LOG_LEVEL_DEBUG, "Subscribed to health events");
   }
 
+  // Time
+  tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
+
   // Instant HR
   prv_update_heart_rate();
 }
@@ -318,6 +403,7 @@ static void prv_init(void) {
 static void prv_deinit(void) {
   window_destroy(s_window);
   health_service_events_unsubscribe();
+  tick_timer_service_unsubscribe();
 }
 
 int main(void) {

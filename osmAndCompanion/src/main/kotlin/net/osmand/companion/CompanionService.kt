@@ -21,6 +21,7 @@ import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -30,6 +31,7 @@ import net.osmand.aidlapi.IOsmAndAidlInterface
 import net.osmand.aidlapi.customization.PreferenceParams
 import net.osmand.aidlapi.gpx.AGpxBitmap
 import net.osmand.aidlapi.gpx.StartGpxRecordingParams
+import net.osmand.aidlapi.gpx.StopGpxRecordingParams
 import net.osmand.aidlapi.logcat.OnLogcatMessageParams
 import net.osmand.aidlapi.navigation.ADirectionInfo
 import net.osmand.aidlapi.navigation.ANavigationUpdateParams
@@ -43,12 +45,18 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
     private lateinit var osmandHelper: OsmAndHelper
     private lateinit var pebbleConnector: PebbleConnector
     private var recordingState = RecordingState.STOPPED
+    private var timerJob: Job? = null
     private var locationManager: LocationManager? = null
 
     private var lastInstruction: String = "Disconnected"
     private var lastDistance: String = "---"
     private var lastSpeed: Float = 0f
     private var lastTurnType: Int = 0
+
+    private var lastRecTime: String = ""
+    private var lastRecDist: String = ""
+    private var lastRemDist: String = ""
+    private var lastRemTime: String = ""
 
     override fun onCreate() {
         super.onCreate()
@@ -95,10 +103,30 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         Log.d(TAG, "CompanionService Destroyed")
     }
 
+    private var recordingStartTime: Long = 0L
+    private var pauseStartTime: Long = 0L
+    private var recordingDistance: Float = 0f
+    private var lastLocation: Location? = null
+
+    private fun updateRecordingStats(location: Location) {
+        if (recordingState == RecordingState.RUNNING) {
+            if (recordingStartTime == 0L) {
+                recordingStartTime = System.currentTimeMillis()
+            }
+            lastLocation?.let {
+                recordingDistance += it.distanceTo(location)
+            }
+            lastRecTime = formatDuration(((System.currentTimeMillis() - recordingStartTime) / 1000).toInt())
+            lastRecDist = formatDistance(recordingDistance.toInt())
+        }
+        lastLocation = location
+    }
+
     override fun onLocationChanged(location: Location) {
         lastSpeed = location.speed
         CompanionRepository.setSpeed(lastSpeed)
         handleAutoPause(lastSpeed)
+        updateRecordingStats(location)
         sendStateToPebble()
     }
 
@@ -110,30 +138,46 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         if (recordingState == RecordingState.RUNNING && speed <= 0.1f) {
             Log.i(TAG, "Auto-pausing recording (speed=0)")
             serviceScope.launch {
-                setOsmAndRecordingPreference(false)
+                setOsmAndRecording(false)
                 recordingState = RecordingState.PAUSED_AUTO
+                pauseStartTime = System.currentTimeMillis()
+                stopTimer()
                 CompanionRepository.setRecordingState(recordingState)
                 sendStateToPebble()
             }
         } else if (recordingState == RecordingState.PAUSED_AUTO && speed > 0.5f) {
             Log.i(TAG, "Auto-resuming recording (speed > 0)")
             serviceScope.launch {
-                setOsmAndRecordingPreference(true)
+                setOsmAndRecording(true)
                 recordingState = RecordingState.RUNNING
+                if (pauseStartTime != 0L) {
+                    recordingStartTime += (System.currentTimeMillis() - pauseStartTime)
+                    pauseStartTime = 0L
+                }
+                startTimer()
                 CompanionRepository.setRecordingState(recordingState)
                 sendStateToPebble()
             }
         }
     }
 
-    private suspend fun setOsmAndRecordingPreference(enabled: Boolean) {
+    private suspend fun setOsmAndRecording(enabled: Boolean) {
         val aidl = osmandHelper.getInterface() ?: return
         try {
+            if (enabled) {
+                if (!aidl.startGpxRecording(StartGpxRecordingParams())) {
+                    aidl.changePluginState(PluginParams("osmand.monitoring", 1))
+                    delay(500.milliseconds)
+                    aidl.startGpxRecording(StartGpxRecordingParams())
+                }
+            } else {
+                aidl.stopGpxRecording(StopGpxRecordingParams())
+            }
             val params = PreferenceParams("save_global_track_to_gpx")
             params.value = enabled.toString()
             aidl.setPreference(params)
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting recording preference", e)
+            Log.e(TAG, "Error setting recording state", e)
         }
     }
 
@@ -153,6 +197,13 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
             }
             
             PebbleKit.startAppOnPebble(applicationContext, pebbleConnector.getAppUuid())
+            
+            try {
+                osmandAidlInterface.registerForUpdates(5000L, aidlCallback)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering for general updates", e)
+            }
+
             syncRecordingState(osmandAidlInterface)
             sendStateToPebble()
         }
@@ -178,6 +229,7 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         }
         override fun onUpdate() {
             Log.d(TAG, "onUpdate")
+            osmandHelper.getInterface()?.let { syncRecordingState(it) }
         }
         override fun onAppInitialized() {
             Log.d(TAG, "onAppInitialized")
@@ -262,6 +314,40 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         }
     }
 
+    private fun formatDuration(seconds: Int): String {
+        if (seconds < 0) {
+            return ""
+        }
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return if (h > 0) {
+            String.format("%d:%02d:%02d", h, m, s)
+        } else {
+            String.format("%d:%02d", m, s)
+        }
+    }
+
+    private fun startTimer() {
+        if (timerJob?.isActive == true) return
+        timerJob = serviceScope.launch {
+            while (true) {
+                if (recordingState == RecordingState.RUNNING) {
+                    if (recordingStartTime != 0L) {
+                        lastRecTime = formatDuration(((System.currentTimeMillis() - recordingStartTime) / 1000).toInt())
+                    }
+                    sendStateToPebble()
+                }
+                delay(1000)
+            }
+        }
+    }
+
+    private fun stopTimer() {
+        timerJob?.cancel()
+        timerJob = null
+    }
+
     override fun onMessageReceived(data: PebbleDictionary) {
         serviceScope.launch {
             Log.i(TAG, "Message received from Pebble: $data")
@@ -272,7 +358,10 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
             }
             
             if (data.getInteger(KEY_REFRESH_COMMAND) != null) {
-                osmandHelper.getInterface()?.let { syncNavInfo(it) }
+                osmandHelper.getInterface()?.let { 
+                    syncNavInfo(it)
+                    syncRecordingState(it)
+                }
             }
 
             val heartRate = data.getInteger(KEY_HEALTH_HEART_RATE)
@@ -289,13 +378,18 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
     private suspend fun syncNavInfo(aidl: IOsmAndAidlInterface) {
         try {
             val appInfo = aidl.getAppInfo()
-            if (appInfo != null && appInfo.turnInfo != null) {
-                val turnInfo = appInfo.turnInfo
-                val turnTypeXml = turnInfo.getString("next_turn_type")
-                if (turnTypeXml != null) {
-                    lastTurnType = getTurnTypeFromXml(turnTypeXml)
-                    lastInstruction = mapTurnTypeXml(turnTypeXml)
-                    lastDistance = formatDistance(turnInfo.getInt("next_turn_distance"))
+            if (appInfo != null) {
+                lastRemDist = formatDistance(appInfo.leftDistance)
+                lastRemTime = formatDuration(appInfo.leftTime)
+
+                if (appInfo.turnInfo != null) {
+                    val turnInfo = appInfo.turnInfo
+                    val turnTypeXml = turnInfo.getString("next_turn_type")
+                    if (turnTypeXml != null) {
+                        lastTurnType = getTurnTypeFromXml(turnTypeXml)
+                        lastInstruction = mapTurnTypeXml(turnTypeXml)
+                        lastDistance = formatDistance(turnInfo.getInt("next_turn_distance"))
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -331,34 +425,30 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
                 return
             }
             if (recordingState == RecordingState.STOPPED) {
-                val started = aidl.startGpxRecording(StartGpxRecordingParams())
-                if (!started) {
-                    Log.w(TAG, "Failed to start GPX recording, attempting to enable plugin...")
-                    val pluginEnabled = aidl.changePluginState(PluginParams("osmand.monitoring", 1))
-                    Log.i(TAG, "changePluginState(osmand.monitoring, 1) result: $pluginEnabled")
-                    
-                    // Wait for plugin to initialize
-                    delay(500.milliseconds)
-                    
-                    if (aidl.startGpxRecording(StartGpxRecordingParams())) {
-                        recordingState = RecordingState.RUNNING
-                        Log.i(TAG, "Started GPX recording after enabling plugin")
-                    } else {
-                        Log.e(TAG, "Still failed to start GPX recording. Monitoring plugin might be inactive or locked.")
-                    }
-                } else {
-                    recordingState = RecordingState.RUNNING
-                    Log.i(TAG, "Started GPX recording")
-                }
+                setOsmAndRecording(true)
+                recordingState = RecordingState.RUNNING
+                recordingStartTime = System.currentTimeMillis()
+                recordingDistance = 0f
+                lastRecTime = formatDuration(0)
+                lastRecDist = formatDistance(0)
+                startTimer()
+                Log.i(TAG, "Started GPX recording")
             } else if (recordingState == RecordingState.RUNNING || recordingState == RecordingState.PAUSED_AUTO) {
                 // Manually pause if running
-                setOsmAndRecordingPreference(false)
+                setOsmAndRecording(false)
                 recordingState = RecordingState.PAUSED_MANUAL
+                pauseStartTime = System.currentTimeMillis()
+                stopTimer()
                 Log.i(TAG, "Manually paused GPX recording")
             } else if (recordingState == RecordingState.PAUSED_MANUAL) {
                 // Resume from manual pause
-                setOsmAndRecordingPreference(true)
+                setOsmAndRecording(true)
                 recordingState = RecordingState.RUNNING
+                if (pauseStartTime != 0L) {
+                    recordingStartTime += (System.currentTimeMillis() - pauseStartTime)
+                    pauseStartTime = 0L
+                }
+                startTimer()
                 Log.i(TAG, "Resumed GPX recording from manual pause")
             }
             CompanionRepository.setRecordingState(recordingState)
@@ -379,9 +469,25 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
                 val params = PreferenceParams("save_global_track_to_gpx")
                 if (aidl.getPreference(params)) {
                     val isRecording = params.value?.toBoolean() ?: false
-                    recordingState = if (isRecording) RecordingState.RUNNING else RecordingState.STOPPED
+                    if (isRecording) {
+                        if (recordingState != RecordingState.RUNNING) {
+                            recordingState = RecordingState.RUNNING
+                            if (recordingStartTime == 0L) {
+                                recordingStartTime = System.currentTimeMillis()
+                            }
+                            startTimer()
+                        }
+                    } else if (recordingState != RecordingState.PAUSED_AUTO && recordingState != RecordingState.PAUSED_MANUAL) {
+                        recordingState = RecordingState.STOPPED
+                        recordingStartTime = 0L
+                        recordingDistance = 0f
+                        lastRecTime = ""
+                        lastRecDist = ""
+                        stopTimer()
+                    }
                     CompanionRepository.setRecordingState(recordingState)
                     Log.i(TAG, "Synced recording state from OsmAnd: $recordingState")
+                    sendStateToPebble()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing recording state", e)
@@ -401,6 +507,10 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
             RecordingState.STOPPED -> 0
         }
         dict.addInt32(KEY_RECORDING_STATE, pebbleRecState)
+        dict.addString(KEY_RECORDING_TIME, lastRecTime)
+        dict.addString(KEY_RECORDING_DISTANCE, lastRecDist)
+        dict.addString(KEY_REMAINING_DISTANCE, lastRemDist)
+        dict.addString(KEY_REMAINING_TIME, lastRemTime)
         pebbleConnector.sendData(dict)
     }
 
@@ -434,5 +544,9 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         private const val KEY_RECORDING_STATE = 5
         private const val KEY_REFRESH_COMMAND = 6
         private const val KEY_NAV_TYPE = 7
+        private const val KEY_RECORDING_TIME = 8
+        private const val KEY_RECORDING_DISTANCE = 9
+        private const val KEY_REMAINING_DISTANCE = 10
+        private const val KEY_REMAINING_TIME = 11
     }
 }

@@ -25,8 +25,12 @@ class MainViewModel : ViewModel() {
             _uiState.value = _uiState.value.copy(heartRate = it)
         }.launchIn(viewModelScope)
         
-        CompanionRepository.isRecording.onEach {
-            _uiState.value = _uiState.value.copy(isRecording = it)
+        CompanionRepository.recordingState.onEach {
+            _uiState.value = _uiState.value.copy(recordingState = it)
+        }.launchIn(viewModelScope)
+
+        CompanionRepository.speed.onEach {
+            _uiState.value = _uiState.value.copy(speed = it)
         }.launchIn(viewModelScope)
     }
 
@@ -35,7 +39,8 @@ class MainViewModel : ViewModel() {
         val osmandConnected: Boolean = false,
         val pebbleConnected: Boolean = false,
         val heartRate: Int = 0,
-        val isRecording: Boolean = false
+        val recordingState: RecordingState = RecordingState.STOPPED,
+        val speed: Float = 0f
     )
 
     fun setServiceRunning(running: Boolean) {

@@ -41,9 +41,22 @@ class MainActivity : ComponentActivity() {
 
     private fun checkPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val permissions = arrayOf(
+            val permissions = mutableListOf(
                 Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_SCAN
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+            val neededPermissions = permissions.filter {
+                checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (neededPermissions.isNotEmpty()) {
+                requestPermissions(neededPermissions.toTypedArray(), 1)
+            }
+        } else {
+            val permissions = arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
             val neededPermissions = permissions.filter {
                 checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
@@ -92,7 +105,13 @@ fun MainScreen(
         StatusItem("OsmAnd", if (uiState.osmandConnected) "Connected" else "Disconnected")
         StatusItem("Pebble", if (uiState.pebbleConnected) "Connected" else "Disconnected")
         StatusItem("Heart Rate", "${uiState.heartRate} bpm")
-        StatusItem("Recording", if (uiState.isRecording) "On" else "Off")
+        StatusItem("Speed", "${(uiState.speed * 3.6f).toInt()} km/h")
+        StatusItem("Recording", when(uiState.recordingState) {
+            RecordingState.RUNNING -> "Running"
+            RecordingState.PAUSED_AUTO -> "Paused (Auto)"
+            RecordingState.PAUSED_MANUAL -> "Paused (Manual)"
+            RecordingState.STOPPED -> "Stopped"
+        })
         
         Spacer(modifier = Modifier.height(32.dp))
         

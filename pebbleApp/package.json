@@ -31,7 +31,11 @@
       "NAV_INSTRUCTION": 0,
       "NAV_DISTANCE": 1,
       "RECORDING_COMMAND": 2,
-      "HEALTH_HEART_RATE": 3
+      "HEALTH_HEART_RATE": 3,
+      "SPEED": 4,
+      "RECORDING_STATE": 5,
+      "REFRESH_COMMAND": 6,
+      "NAV_TYPE": 7
     },
     "projectType": "native",
     "resources": {

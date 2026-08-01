@@ -4,40 +4,51 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import net.osmand.aidlapi.IOsmAndAidlCallback
 import net.osmand.aidlapi.IOsmAndAidlInterface
 import net.osmand.aidlapi.customization.PreferenceParams
-import net.osmand.aidlapi.info.AppInfoParams
 import net.osmand.aidlapi.gpx.AGpxBitmap
 import net.osmand.aidlapi.gpx.StartGpxRecordingParams
-import net.osmand.aidlapi.gpx.StopGpxRecordingParams
-import net.osmand.aidlapi.plugins.PluginParams
 import net.osmand.aidlapi.logcat.OnLogcatMessageParams
 import net.osmand.aidlapi.navigation.ADirectionInfo
 import net.osmand.aidlapi.navigation.ANavigationUpdateParams
 import net.osmand.aidlapi.navigation.OnVoiceNavigationParams
+import net.osmand.aidlapi.plugins.PluginParams
 import net.osmand.aidlapi.search.SearchResult
 import kotlin.time.Duration.Companion.milliseconds
 
-class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, PebbleConnector.PebbleMessageListener {
+class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, PebbleConnector.PebbleMessageListener, LocationListener {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var osmandHelper: OsmAndHelper
     private lateinit var pebbleConnector: PebbleConnector
-    private var isRecording = false
+    private var recordingState = RecordingState.STOPPED
+    private var locationManager: LocationManager? = null
 
-    private var lastInstruction: String = "Waiting for Nav..."
+    private var lastInstruction: String = "Disconnected"
     private var lastDistance: String = "---"
+    private var lastSpeed: Float = 0f
+    private var lastTurnType: Int = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -46,17 +57,28 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         osmandHelper = OsmAndHelper(this, this)
         pebbleConnector = PebbleConnector(this, this)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
                 createNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                createNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
             )
         } else {
             startForeground(
                 NOTIFICATION_ID,
                 createNotification()
             )
+        }
+
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
         }
 
         osmandHelper.bind()
@@ -66,10 +88,53 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
     override fun onDestroy() {
         Log.d(TAG, "CompanionService Destroying")
         serviceScope.cancel()
+        locationManager?.removeUpdates(this)
         osmandHelper.unbind()
         pebbleConnector.disconnect()
         super.onDestroy()
         Log.d(TAG, "CompanionService Destroyed")
+    }
+
+    override fun onLocationChanged(location: Location) {
+        lastSpeed = location.speed
+        CompanionRepository.setSpeed(lastSpeed)
+        handleAutoPause(lastSpeed)
+        sendStateToPebble()
+    }
+
+    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+    override fun onProviderEnabled(provider: String) {}
+    override fun onProviderDisabled(provider: String) {}
+
+    private fun handleAutoPause(speed: Float) {
+        if (recordingState == RecordingState.RUNNING && speed <= 0.1f) {
+            Log.i(TAG, "Auto-pausing recording (speed=0)")
+            serviceScope.launch {
+                setOsmAndRecordingPreference(false)
+                recordingState = RecordingState.PAUSED_AUTO
+                CompanionRepository.setRecordingState(recordingState)
+                sendStateToPebble()
+            }
+        } else if (recordingState == RecordingState.PAUSED_AUTO && speed > 0.5f) {
+            Log.i(TAG, "Auto-resuming recording (speed > 0)")
+            serviceScope.launch {
+                setOsmAndRecordingPreference(true)
+                recordingState = RecordingState.RUNNING
+                CompanionRepository.setRecordingState(recordingState)
+                sendStateToPebble()
+            }
+        }
+    }
+
+    private suspend fun setOsmAndRecordingPreference(enabled: Boolean) {
+        val aidl = osmandHelper.getInterface() ?: return
+        try {
+            val params = PreferenceParams("save_global_track_to_gpx")
+            params.value = enabled.toString()
+            aidl.setPreference(params)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting recording preference", e)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -78,12 +143,19 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         Log.i(TAG, "Connected to OsmAnd")
         CompanionRepository.setOsmAndConnected(true)
         
-        lastInstruction = "Connected to OsmAnd"
-        lastDistance = "---"
-        
-        PebbleKit.startAppOnPebble(applicationContext, pebbleConnector.getAppUuid())
-        syncRecordingState(osmandAidlInterface)
-        sendStateToPebble()
+        serviceScope.launch {
+            try {
+                syncNavInfo(osmandAidlInterface)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error getting initial app info", e)
+                lastInstruction = "Connected to OsmAnd"
+                lastDistance = "---"
+            }
+            
+            PebbleKit.startAppOnPebble(applicationContext, pebbleConnector.getAppUuid())
+            syncRecordingState(osmandAidlInterface)
+            sendStateToPebble()
+        }
 
         try {
             osmandAidlInterface.registerForNavigationUpdates(
@@ -134,30 +206,51 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         val distance = info.distanceTo
         val turnType = info.turnType
 
+        lastTurnType = turnType
         lastInstruction = mapTurnType(turnType)
         lastDistance = formatDistance(distance)
 
-        Log.i(TAG, "Nav Update: $lastInstruction in $lastDistance")
+        Log.i(TAG, "Nav Update: $lastInstruction in $lastDistance (type=$lastTurnType)")
         sendStateToPebble()
     }
 
     private fun mapTurnType(type: Int): String {
         return when (type) {
-            1 -> "Straight"
-            2 -> "Left"
-            3 -> "Slight Left"
-            4 -> "Sharp Left"
-            5 -> "Right"
-            6 -> "Slight Right"
-            7 -> "Sharp Right"
-            8 -> "Keep Left"
-            9 -> "Keep Right"
-            10 -> "U-Turn"
-            11 -> "U-Turn Right"
-            12 -> "Off Route"
-            13 -> "Roundabout"
-            14 -> "Roundabout Left"
-            else -> "Unknown"
+            1 -> "↑" // Straight
+            2 -> "←" // Left
+            3 -> "↖" // Slight Left
+            4 -> "↙" // Sharp Left
+            5 -> "→" // Right
+            6 -> "↗" // Slight Right
+            7 -> "↘" // Sharp Right
+            8 -> "↖" // Keep Left
+            9 -> "↗" // Keep Right
+            10 -> "↺" // U-Turn
+            11 -> "↺" // U-Turn Right
+            12 -> "✕" // Off Route
+            13 -> "⟳" // Roundabout
+            14 -> "⟲" // Roundabout Left
+            else -> "?"
+        }
+    }
+
+    private fun mapTurnTypeXml(xml: String): String {
+        return when {
+            xml == "C" -> "↑"
+            xml == "TL" -> "←"
+            xml == "TSLL" -> "↖"
+            xml == "TSHL" -> "↙"
+            xml == "TR" -> "→"
+            xml == "TSLR" -> "↗"
+            xml == "TSHR" -> "↘"
+            xml == "KL" -> "↖"
+            xml == "KR" -> "↗"
+            xml == "TU" -> "↺"
+            xml == "TRU" -> "↺"
+            xml == "OFFR" -> "✕"
+            xml.startsWith("RNDB") -> "⟳"
+            xml.startsWith("RNLB") -> "⟲"
+            else -> "?"
         }
     }
 
@@ -177,6 +270,10 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
             if (data.getInteger(KEY_RECORDING_COMMAND) != null) {
                 toggleGpxRecording()
             }
+            
+            if (data.getInteger(KEY_REFRESH_COMMAND) != null) {
+                osmandHelper.getInterface()?.let { syncNavInfo(it) }
+            }
 
             val heartRate = data.getInteger(KEY_HEALTH_HEART_RATE)
             if (heartRate != null) {
@@ -189,40 +286,82 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         }
     }
 
+    private suspend fun syncNavInfo(aidl: IOsmAndAidlInterface) {
+        try {
+            val appInfo = aidl.getAppInfo()
+            if (appInfo != null && appInfo.turnInfo != null) {
+                val turnInfo = appInfo.turnInfo
+                val turnTypeXml = turnInfo.getString("next_turn_type")
+                if (turnTypeXml != null) {
+                    lastTurnType = getTurnTypeFromXml(turnTypeXml)
+                    lastInstruction = mapTurnTypeXml(turnTypeXml)
+                    lastDistance = formatDistance(turnInfo.getInt("next_turn_distance"))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing nav info", e)
+        }
+    }
+
+    private fun getTurnTypeFromXml(xml: String): Int {
+        return when {
+            xml == "C" -> 1
+            xml == "TL" -> 2
+            xml == "TSLL" -> 3
+            xml == "TSHL" -> 4
+            xml == "TR" -> 5
+            xml == "TSLR" -> 6
+            xml == "TSHR" -> 7
+            xml == "KL" -> 8
+            xml == "KR" -> 9
+            xml == "TU" -> 10
+            xml == "TRU" -> 11
+            xml == "OFFR" -> 12
+            xml.startsWith("RNDB") -> 13
+            xml.startsWith("RNLB") -> 14
+            else -> 0
+        }
+    }
+
     private suspend fun toggleGpxRecording() {
         val aidl = osmandHelper.getInterface() ?: return
         try {
-            if (aidl.appInfo == null) {
+            if (aidl.getAppInfo() == null) {
                 Log.e(TAG, "Not authorized to control OsmAnd. Please enable this Plugin in OsmAnd settings.")
                 return
             }
-            if (!isRecording) {
+            if (recordingState == RecordingState.STOPPED) {
                 val started = aidl.startGpxRecording(StartGpxRecordingParams())
                 if (!started) {
                     Log.w(TAG, "Failed to start GPX recording, attempting to enable plugin...")
                     val pluginEnabled = aidl.changePluginState(PluginParams("osmand.monitoring", 1))
                     Log.i(TAG, "changePluginState(osmand.monitoring, 1) result: $pluginEnabled")
                     
-                    // ponytail: wait for plugin to initialize
+                    // Wait for plugin to initialize
                     delay(500.milliseconds)
                     
                     if (aidl.startGpxRecording(StartGpxRecordingParams())) {
-                        isRecording = true
+                        recordingState = RecordingState.RUNNING
                         Log.i(TAG, "Started GPX recording after enabling plugin")
                     } else {
                         Log.e(TAG, "Still failed to start GPX recording. Monitoring plugin might be inactive or locked.")
                     }
                 } else {
-                    isRecording = true
+                    recordingState = RecordingState.RUNNING
                     Log.i(TAG, "Started GPX recording")
                 }
-            } else {
-                if (aidl.stopGpxRecording(StopGpxRecordingParams())) {
-                    isRecording = false
-                    Log.i(TAG, "Stopped GPX recording")
-                }
+            } else if (recordingState == RecordingState.RUNNING || recordingState == RecordingState.PAUSED_AUTO) {
+                // Manually pause if running
+                setOsmAndRecordingPreference(false)
+                recordingState = RecordingState.PAUSED_MANUAL
+                Log.i(TAG, "Manually paused GPX recording")
+            } else if (recordingState == RecordingState.PAUSED_MANUAL) {
+                // Resume from manual pause
+                setOsmAndRecordingPreference(true)
+                recordingState = RecordingState.RUNNING
+                Log.i(TAG, "Resumed GPX recording from manual pause")
             }
-            CompanionRepository.setRecording(isRecording)
+            CompanionRepository.setRecordingState(recordingState)
             sendStateToPebble()
         } catch (e: Exception) {
             Log.e(TAG, "Error toggling GPX recording", e)
@@ -232,17 +371,17 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
     private fun syncRecordingState(aidl: IOsmAndAidlInterface) {
         serviceScope.launch {
             try {
-                if (aidl.appInfo == null) {
+                val appInfo = aidl.getAppInfo()
+                if (appInfo == null) {
                     Log.w(TAG, "Cannot sync state: Not authorized")
                     return@launch
                 }
                 val params = PreferenceParams("save_global_track_to_gpx")
                 if (aidl.getPreference(params)) {
-                    isRecording = params.value?.toBoolean() ?: false
-                    CompanionRepository.setRecording(isRecording)
-                    Log.i(TAG, "Synced recording state from OsmAnd: $isRecording")
-                } else {
-                    Log.w(TAG, "Failed to sync recording state: preference 'save_global_track_to_gpx' not available via AIDL (likely global)")
+                    val isRecording = params.value?.toBoolean() ?: false
+                    recordingState = if (isRecording) RecordingState.RUNNING else RecordingState.STOPPED
+                    CompanionRepository.setRecordingState(recordingState)
+                    Log.i(TAG, "Synced recording state from OsmAnd: $recordingState")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing recording state", e)
@@ -254,7 +393,14 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         val dict = PebbleDictionary()
         dict.addString(KEY_NAV_INSTRUCTION, lastInstruction)
         dict.addString(KEY_NAV_DISTANCE, lastDistance)
-        dict.addInt32(KEY_RECORDING_COMMAND, if (isRecording) 1 else 0)
+        dict.addInt32(KEY_SPEED, (lastSpeed * 3.6f).toInt())
+        dict.addInt32(KEY_NAV_TYPE, lastTurnType)
+        val pebbleRecState = when (recordingState) {
+            RecordingState.RUNNING -> 1
+            RecordingState.PAUSED_AUTO, RecordingState.PAUSED_MANUAL -> 2
+            RecordingState.STOPPED -> 0
+        }
+        dict.addInt32(KEY_RECORDING_STATE, pebbleRecState)
         pebbleConnector.sendData(dict)
     }
 
@@ -284,5 +430,9 @@ class CompanionService : Service(), OsmAndHelper.OsmAndConnectionListener, Pebbl
         private const val KEY_NAV_DISTANCE = 1
         private const val KEY_RECORDING_COMMAND = 2
         private const val KEY_HEALTH_HEART_RATE = 3
+        private const val KEY_SPEED = 4
+        private const val KEY_RECORDING_STATE = 5
+        private const val KEY_REFRESH_COMMAND = 6
+        private const val KEY_NAV_TYPE = 7
     }
 }

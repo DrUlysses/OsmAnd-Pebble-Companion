@@ -54,15 +54,12 @@ class PebbleConnector(
     }
 
     fun sendData(data: PebbleDictionary) {
-        val connected = PebbleKit.isWatchConnected(appContext)
-        Log.d(TAG, "sendData: connected=$connected, data=$data")
-        if (connected) {
-            PebbleKit.sendDataToPebble(
-                appContext,
-                appUuid,
-                data
-            )
-        }
+        Log.d(TAG, "sendData: data=$data")
+        PebbleKit.sendDataToPebble(
+            appContext,
+            appUuid,
+            data
+        )
     }
 
     fun getAppUuid(): UUID = appUuid

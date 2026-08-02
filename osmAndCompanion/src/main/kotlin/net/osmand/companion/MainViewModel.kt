@@ -14,23 +14,33 @@ class MainViewModel : ViewModel() {
 
     init {
         CompanionRepository.osmandConnected.onEach {
-            _uiState.value = _uiState.value.copy(osmandConnected = it)
+            _uiState.value = _uiState.value.copy(
+                osmandConnected = it
+            )
         }.launchIn(viewModelScope)
 
         CompanionRepository.pebbleConnected.onEach {
-            _uiState.value = _uiState.value.copy(pebbleConnected = it)
+            _uiState.value = _uiState.value.copy(
+                pebbleConnected = it
+            )
         }.launchIn(viewModelScope)
 
         CompanionRepository.heartRate.onEach {
-            _uiState.value = _uiState.value.copy(heartRate = it)
+            _uiState.value = _uiState.value.copy(
+                heartRate = it
+            )
         }.launchIn(viewModelScope)
         
         CompanionRepository.recordingState.onEach {
-            _uiState.value = _uiState.value.copy(recordingState = it)
+            _uiState.value = _uiState.value.copy(
+                recordingState = it
+            )
         }.launchIn(viewModelScope)
 
         CompanionRepository.speed.onEach {
-            _uiState.value = _uiState.value.copy(speed = it)
+            _uiState.value = _uiState.value.copy(
+                speed = it
+            )
         }.launchIn(viewModelScope)
     }
 
@@ -43,7 +53,11 @@ class MainViewModel : ViewModel() {
         val speed: Float = 0f
     )
 
-    fun setServiceRunning(running: Boolean) {
-        _uiState.value = _uiState.value.copy(isServiceRunning = running)
+    fun setServiceRunning(
+        running: Boolean
+    ) {
+        _uiState.value = _uiState.value.copy(
+            isServiceRunning = running
+        )
     }
 }

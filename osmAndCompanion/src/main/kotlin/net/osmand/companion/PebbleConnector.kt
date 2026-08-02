@@ -35,10 +35,10 @@ class PebbleConnector(
         }
         val filter = IntentFilter(Constants.INTENT_APP_RECEIVE)
         ContextCompat.registerReceiver(
-            appContext,
-            dataReceiver!!,
-            filter,
-            ContextCompat.RECEIVER_EXPORTED
+            /* context = */ appContext,
+            /* receiver = */ dataReceiver!!,
+            /* filter = */ filter,
+            /* flags = */ ContextCompat.RECEIVER_EXPORTED
         )
     }
 
@@ -56,9 +56,9 @@ class PebbleConnector(
     fun sendData(data: PebbleDictionary) {
         Log.d(TAG, "sendData: data=$data")
         PebbleKit.sendDataToPebble(
-            appContext,
-            appUuid,
-            data
+            /* context = */ appContext,
+            /* watchappUuid = */ appUuid,
+            /* data = */ data
         )
     }
 

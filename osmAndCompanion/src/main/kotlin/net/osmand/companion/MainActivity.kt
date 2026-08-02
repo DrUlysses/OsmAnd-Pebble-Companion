@@ -68,13 +68,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startCompanionService() {
-        val intent = Intent(this, CompanionService::class.java)
+        val intent = Intent(
+            /* packageContext = */ this,
+            /* cls = */ CompanionService::class.java
+        )
         startForegroundService(intent)
         viewModel.setServiceRunning(true)
     }
 
     private fun stopCompanionService() {
-        val intent = Intent(this, CompanionService::class.java)
+        val intent = Intent(
+            /* packageContext = */ this,
+            /* cls = */ CompanionService::class.java
+        )
         stopService(intent)
         viewModel.setServiceRunning(false)
     }
@@ -99,19 +105,51 @@ fun MainScreen(
             text = "OsmAnd Pebble Companion",
             style = MaterialTheme.typography.headlineMedium
         )
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(
+            modifier = Modifier.height(32.dp)
+        )
         
-        StatusItem("Service", if (uiState.isServiceRunning) "Running" else "Stopped")
-        StatusItem("OsmAnd", if (uiState.osmandConnected) "Connected" else "Disconnected")
-        StatusItem("Pebble", if (uiState.pebbleConnected) "Connected" else "Disconnected")
-        StatusItem("Heart Rate", "${uiState.heartRate} bpm")
-        StatusItem("Speed", "${(uiState.speed * 3.6f).toInt()} km/h")
-        StatusItem("Recording", when(uiState.recordingState) {
-            RecordingState.RUNNING -> "Running"
-            RecordingState.PAUSED_AUTO -> "Paused (Auto)"
-            RecordingState.PAUSED_MANUAL -> "Paused (Manual)"
-            RecordingState.STOPPED -> "Stopped"
-        })
+        StatusItem(
+            label = "Service",
+            status = if (uiState.isServiceRunning) {
+                "Running"
+            } else {
+                "Stopped"
+            }
+        )
+        StatusItem(
+            label = "OsmAnd",
+            status = if (uiState.osmandConnected) {
+                "Connected"
+            } else {
+                "Disconnected"
+            }
+        )
+        StatusItem(
+            label = "Pebble",
+            status = if (uiState.pebbleConnected) {
+                "Connected"
+            } else {
+                "Disconnected"
+            }
+        )
+        StatusItem(
+            label = "Heart Rate",
+            status = "${uiState.heartRate} bpm"
+        )
+        StatusItem(
+            label = "Speed",
+            status = "${(uiState.speed * 3.6f).toInt()} km/h"
+        )
+        StatusItem(
+            label = "Recording",
+            status = when (uiState.recordingState) {
+                RecordingState.RUNNING -> "Running"
+                RecordingState.PAUSED_AUTO -> "Paused (Auto)"
+                RecordingState.PAUSED_MANUAL -> "Paused (Manual)"
+                RecordingState.STOPPED -> "Stopped"
+            }
+        )
         
         Spacer(modifier = Modifier.height(32.dp))
         
@@ -122,7 +160,9 @@ fun MainScreen(
         } else {
             Button(
                 onClick = onStopService,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                )
             ) {
                 Text("Stop Service")
             }
@@ -131,14 +171,23 @@ fun MainScreen(
 }
 
 @Composable
-fun StatusItem(label: String, status: String) {
+fun StatusItem(
+    label: String,
+    status: String
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = label, style = MaterialTheme.typography.bodyLarge)
-        Text(text = status, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Text(
+            text = status,
+            style = MaterialTheme.typography.bodyLarge
+        )
     }
 }

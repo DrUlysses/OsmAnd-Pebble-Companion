@@ -27,19 +27,28 @@ class OsmAndHelper(
             name: ComponentName?,
             service: IBinder?
         ) {
-            Log.d(TAG, "OsmAnd Service Connected: $name")
+            Log.d(
+                /* tag = */ TAG,
+                /* msg = */ "OsmAnd Service Connected: $name"
+            )
             osmandAidlInterface = IOsmAndAidlInterface.Stub.asInterface(service)
             osmandAidlInterface?.let { listener.onConnected(it) }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            Log.d(TAG, "OsmAnd Service Disconnected: $name")
+            Log.d(
+                /* tag = */ TAG,
+                /* msg = */ "OsmAnd Service Disconnected: $name"
+            )
             osmandAidlInterface = null
             listener.onDisconnected()
         }
 
         override fun onBindingDied(name: ComponentName?) {
-            Log.d(TAG, "OsmAnd Binding Died: $name")
+            Log.d(
+                /* tag = */ TAG,
+                /* msg = */ "OsmAnd Binding Died: $name"
+            )
             osmandAidlInterface = null
         }
     }
@@ -56,17 +65,24 @@ class OsmAndHelper(
                 Log.d(TAG, "Attempting to bind to $pkg")
                 if (
                     appContext.bindService(
-                        intent,
-                        connection,
-                        Context.BIND_AUTO_CREATE
+                        /* service = */ intent,
+                        /* conn = */ connection,
+                        /* flags = */ Context.BIND_AUTO_CREATE
                     )
                 ) {
                     isBindCalled = true
-                    Log.i(TAG, "Binding attempt started for $pkg")
+                    Log.i(
+                        /* tag = */ TAG,
+                        /* msg = */ "Binding attempt started for $pkg"
+                    )
                     return
                 }
             } catch (e: SecurityException) {
-                Log.e(TAG, "SecurityException while binding to $pkg", e)
+                Log.e(
+                    /* tag = */ TAG,
+                    /* msg = */ "SecurityException while binding to $pkg",
+                    /* tr = */ e
+                )
             }
         }
         Log.e(TAG, "Failed to bind to any OsmAnd Service")
